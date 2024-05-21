@@ -7,6 +7,7 @@ use crate::server::ServerContext;
 use crate::RequestContext;
 
 use async_trait::async_trait;
+use hyper::body::Body;
 
 /// Metadata associated with an extractor including parameters and whether or not
 /// the associated endpoint is paginated.
@@ -23,9 +24,9 @@ pub struct ExtractorMetadata {
 #[async_trait]
 pub trait ExclusiveExtractor: Send + Sync + Sized {
     /// Construct an instance of this type from a `RequestContext`.
-    async fn from_request<Context: ServerContext>(
+    async fn from_request<Context: ServerContext, ReqBody: Body>(
         rqctx: &RequestContext<Context>,
-        request: hyper::Request<hyper::Body>,
+        request: hyper::Request<ReqBody>,
     ) -> Result<Self, HttpError>;
 
     fn metadata(
@@ -54,9 +55,9 @@ pub trait SharedExtractor: Send + Sync + Sized {
 // A `SharedExtractor` can always be treated like an `ExclusiveExtractor`.
 #[async_trait]
 impl<S: SharedExtractor> ExclusiveExtractor for S {
-    async fn from_request<Context: ServerContext>(
+    async fn from_request<Context: ServerContext, ReqBody: Body>(
         rqctx: &RequestContext<Context>,
-        _request: hyper::Request<hyper::Body>,
+        _request: hyper::Request<ReqBody>,
     ) -> Result<Self, HttpError> {
         <S as SharedExtractor>::from_request(rqctx).await
     }
@@ -94,9 +95,9 @@ impl<S: SharedExtractor> ExclusiveExtractor for S {
 #[async_trait]
 pub trait RequestExtractor: Send + Sync + Sized {
     /// Construct an instance of this type from a `RequestContext`.
-    async fn from_request<Context: ServerContext>(
+    async fn from_request<Context: ServerContext, ReqBody: Body>(
         rqctx: &RequestContext<Context>,
-        request: hyper::Request<hyper::Body>,
+        request: hyper::Request<ReqBody>,
     ) -> Result<Self, HttpError>;
 
     fn metadata(
@@ -107,9 +108,9 @@ pub trait RequestExtractor: Send + Sync + Sized {
 // Impl for zero-element tuple (used for request handlers with no extractors)
 #[async_trait]
 impl RequestExtractor for () {
-    async fn from_request<Context: ServerContext>(
+    async fn from_request<Context: ServerContext, ReqBody: Body>(
         _rqctx: &RequestContext<Context>,
-        _request: hyper::Request<hyper::Body>,
+        _request: hyper::Request<ReqBody>,
     ) -> Result<Self, HttpError> {
         Ok(())
     }
@@ -127,9 +128,9 @@ impl RequestExtractor for () {
 // Impl for one-element tuple with an exclusive extractor
 #[async_trait]
 impl<X: ExclusiveExtractor + 'static> RequestExtractor for (X,) {
-    async fn from_request<Context: ServerContext>(
+    async fn from_request<Context: ServerContext, ReqBody: Body>(
         rqctx: &RequestContext<Context>,
-        request: hyper::Request<hyper::Body>,
+        request: hyper::Request<ReqBody>,
     ) -> Result<Self, HttpError> {
         Ok((X::from_request(rqctx, request).await?,))
     }
@@ -160,9 +161,9 @@ macro_rules! impl_rqextractor_for_tuple {
         RequestExtractor
         for ($($S,)+ X)
     {
-        async fn from_request<Context: ServerContext>(
+        async fn from_request<Context: ServerContext, ReqBody: Body>(
             rqctx: &RequestContext<Context>,
-            request: hyper::Request<hyper::Body>
+            request: hyper::Request<ReqBody>
         ) -> Result<( $($S,)+ X ), HttpError>
         {
             futures::try_join!(

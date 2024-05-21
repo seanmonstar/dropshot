@@ -2,7 +2,8 @@
 //! General-purpose HTTP-related facilities
 
 use bytes::Bytes;
-use hyper::body::HttpBody;
+use hyper::body::Body as HttpBody;
+use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 
 use super::error::HttpError;
@@ -35,8 +36,9 @@ where
     // TODO better understand pin_mut!()
     // TODO do we need to use saturating_add() here?
     let mut nbytesread: usize = 0;
-    while let Some(maybebuf) = body.data().await {
+    while let Some(maybebuf) = body.frame().await {
         let buf = maybebuf?;
+        let Ok(buf) = buf.into_data() else { continue };
         nbytesread += buf.len();
     }
 

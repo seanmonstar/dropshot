@@ -21,6 +21,7 @@ use crate::CONTENT_TYPE_URL_ENCODED;
 
 use http::Method;
 use http::StatusCode;
+use hyper::body::Body;
 use serde::de::Error;
 use serde::Deserialize;
 use serde::Serialize;
@@ -34,9 +35,9 @@ use std::sync::Arc;
 /// provided explicitly--as well as parameters and a description which can be
 /// inferred from function parameter types and doc comments (respectively).
 #[derive(Debug)]
-pub struct ApiEndpoint<Context: ServerContext> {
+pub struct ApiEndpoint<Context: ServerContext, ReqBody: Body> {
     pub operation_id: String,
-    pub handler: Arc<dyn RouteHandler<Context>>,
+    pub handler: Arc<dyn RouteHandler<Context, ReqBody>>,
     pub method: Method,
     pub path: String,
     pub parameters: Vec<ApiEndpointParameter>,
@@ -50,7 +51,7 @@ pub struct ApiEndpoint<Context: ServerContext> {
     pub deprecated: bool,
 }
 
-impl<'a, Context: ServerContext> ApiEndpoint<Context> {
+impl<'a, Context: ServerContext, ReqBody: Body> ApiEndpoint<Context, ReqBody> {
     pub fn new<HandlerType, FuncParams, ResponseType>(
         operation_id: String,
         handler: HandlerType,
@@ -260,13 +261,13 @@ impl std::fmt::Debug for ApiSchemaGenerator {
 /// An ApiDescription represents the endpoints and handler functions in your API.
 /// Other metadata could also be provided here.  This object can be used to
 /// generate an OpenAPI spec or to run an HTTP server implementing the API.
-pub struct ApiDescription<Context: ServerContext> {
+pub struct ApiDescription<Context: ServerContext, ReqBody: Body> {
     /// In practice, all the information we need is encoded in the router.
-    router: HttpRouter<Context>,
+    router: HttpRouter<Context, ReqBody>,
     tag_config: TagConfig,
 }
 
-impl<Context: ServerContext> ApiDescription<Context> {
+impl<Context: ServerContext, ReqBody: Body> ApiDescription<Context, ReqBody> {
     pub fn new() -> Self {
         ApiDescription {
             router: HttpRouter::new(),
@@ -282,14 +283,14 @@ impl<Context: ServerContext> ApiDescription<Context> {
     /// Register a new API endpoint.
     pub fn register<T>(&mut self, endpoint: T) -> Result<(), String>
     where
-        T: Into<ApiEndpoint<Context>>,
+        T: Into<ApiEndpoint<Context, ReqBody>>,
     {
         let e = endpoint.into();
 
         // manually outline, see https://matklad.github.io/2021/09/04/fast-rust-builds.html#Keeping-Instantiations-In-Check
-        fn _register<C: ServerContext>(
-            s: &mut ApiDescription<C>,
-            e: ApiEndpoint<C>,
+        fn _register<C: ServerContext, B: Body>(
+            s: &mut ApiDescription<C, B>,
+            e: ApiEndpoint<C, B>,
         ) -> Result<(), String> {
             s.validate_tags(&e)?;
             s.validate_path_parameters(&e)?;
@@ -306,7 +307,7 @@ impl<Context: ServerContext> ApiDescription<Context> {
     }
 
     /// Validate that the tags conform to the tags policy.
-    fn validate_tags(&self, e: &ApiEndpoint<Context>) -> Result<(), String> {
+    fn validate_tags(&self, e: &ApiEndpoint<Context, ReqBody>) -> Result<(), String> {
         // Don't care about endpoints that don't appear in the OpenAPI
         if !e.visible {
             return Ok(());
@@ -337,7 +338,7 @@ impl<Context: ServerContext> ApiDescription<Context> {
     /// specified by the path parameter arguments to the handler function.
     fn validate_path_parameters(
         &self,
-        e: &ApiEndpoint<Context>,
+        e: &ApiEndpoint<Context, ReqBody>,
     ) -> Result<(), String> {
         // Gather up the path parameters and the path variable components, and
         // make sure they're identical.
@@ -396,7 +397,7 @@ impl<Context: ServerContext> ApiDescription<Context> {
     /// received for a wildcard path which must be an array of String.
     fn validate_named_parameters(
         &self,
-        e: &ApiEndpoint<Context>,
+        e: &ApiEndpoint<Context, ReqBody>,
     ) -> Result<(), String> {
         enum SegmentOrWildcard {
             Segment,
@@ -490,7 +491,7 @@ impl<Context: ServerContext> ApiDescription<Context> {
         &self,
         title: S1,
         version: S2,
-    ) -> OpenApiDefinition<Context>
+    ) -> OpenApiDefinition<Context, ReqBody>
     where
         S1: AsRef<str>,
         S2: AsRef<str>,
@@ -873,7 +874,7 @@ impl<Context: ServerContext> ApiDescription<Context> {
     // TODO-cleanup is there a way to make this available only within this
     // crate?  Once we do that, we don't need to consume the ApiDescription to
     // do this.
-    pub fn into_router(self) -> HttpRouter<Context> {
+    pub fn into_router(self) -> HttpRouter<Context, ReqBody> {
         self.router
     }
 }
@@ -939,17 +940,17 @@ fn is_empty(schema: &schemars::schema::Schema) -> bool {
 /// Additional optional properties may be added and then the OpenAPI definition
 /// document may be generated via [`write()`](`OpenApiDefinition::write`) or
 /// [`json()`](`OpenApiDefinition::json`).
-pub struct OpenApiDefinition<'a, Context: ServerContext> {
-    api: &'a ApiDescription<Context>,
+pub struct OpenApiDefinition<'a, Context: ServerContext, ReqBody: Body> {
+    api: &'a ApiDescription<Context, ReqBody>,
     info: openapiv3::Info,
 }
 
-impl<'a, Context: ServerContext> OpenApiDefinition<'a, Context> {
+impl<'a, Context: ServerContext, ReqBody: Body> OpenApiDefinition<'a, Context, ReqBody> {
     fn new(
-        api: &'a ApiDescription<Context>,
+        api: &'a ApiDescription<Context, ReqBody>,
         title: &str,
         version: &str,
-    ) -> OpenApiDefinition<'a, Context> {
+    ) -> OpenApiDefinition<'a, Context, ReqBody> {
         let info = openapiv3::Info {
             title: title.to_string(),
             version: version.to_string(),

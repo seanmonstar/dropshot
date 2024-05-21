@@ -7,27 +7,28 @@ use crate::error::HttpError;
 use crate::server::ServerContext;
 use crate::{ExclusiveExtractor, ExtractorMetadata, RequestContext};
 use async_trait::async_trait;
+use hyper::body::Body;
 use std::fmt::Debug;
 
 /// `RawRequest` is an extractor providing access to the raw underlying
 /// [`hyper::Request`].
 #[derive(Debug)]
-pub struct RawRequest {
-    request: hyper::Request<hyper::Body>,
+pub struct RawRequest<B> {
+    request: hyper::Request<B>,
 }
 
-impl RawRequest {
-    pub fn into_inner(self) -> hyper::Request<hyper::Body> {
+impl<B> RawRequest<B> {
+    pub fn into_inner(self) -> hyper::Request<B> {
         self.request
     }
 }
 
 #[async_trait]
-impl ExclusiveExtractor for RawRequest {
-    async fn from_request<Context: ServerContext>(
+impl<B> ExclusiveExtractor for RawRequest<B> {
+    async fn from_request<Context: ServerContext, ReqBody: Body>(
         _rqctx: &RequestContext<Context>,
-        request: hyper::Request<hyper::Body>,
-    ) -> Result<RawRequest, HttpError> {
+        request: hyper::Request<ReqBody>,
+    ) -> Result<RawRequest<ReqBody>, HttpError> {
         Ok(RawRequest { request })
     }
 

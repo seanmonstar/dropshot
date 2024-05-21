@@ -6,14 +6,13 @@ use camino::Utf8PathBuf;
 use chrono::DateTime;
 use chrono::Utc;
 use http::method::Method;
-use hyper::body::to_bytes;
-use hyper::client::HttpConnector;
-use hyper::Body;
-use hyper::Client;
+use http_body_util::BodyExt as _;
+use hyper::body::Bytes;
 use hyper::Request;
 use hyper::Response;
 use hyper::StatusCode;
 use hyper::Uri;
+use hyper_util::client::legacy::{Client, connect::HttpConnector};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
@@ -70,6 +69,9 @@ const ALLOWED_HEADERS: [AllowedHeader<'static>; 8] = [
     AllowedHeader::new(TEST_HEADER_2),
 ];
 
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type Body = http_body_util::combinators::BoxBody<Bytes, BoxError>;
+
 /// ClientTestContext encapsulates several facilities associated with using an
 /// HTTP client for testing.
 #[derive(Clone)]
@@ -77,7 +79,7 @@ pub struct ClientTestContext {
     /// actual bind address of the HTTP server under test
     pub bind_address: SocketAddr,
     /// HTTP client, used for making requests against the test server
-    pub client: Client<HttpConnector>,
+    pub client: Client<HttpConnector, Body>,
     /// logger for the test suite HTTP client
     pub client_log: Logger,
 }
@@ -121,10 +123,10 @@ impl ClientTestContext {
         path: &str,
         request_body: Option<RequestBodyType>,
         expected_status: StatusCode,
-    ) -> Result<Response<Body>, HttpErrorResponseBody> {
+    ) -> Result<Response<hyper::body::Incoming>, HttpErrorResponseBody> {
         let body: Body = match request_body {
-            None => Body::empty(),
-            Some(input) => serde_json::to_string(&input).unwrap().into(),
+            None => todo!(),
+            Some(input) => todo!(), //serde_json::to_string(&input).unwrap().into(),
         };
 
         self.make_request_with_body(method, path, body, expected_status).await
@@ -141,10 +143,10 @@ impl ClientTestContext {
         path: &str,
         request_body: Option<RequestBodyType>,
         expected_status: StatusCode,
-    ) -> Result<Response<Body>, HttpErrorResponseBody> {
+    ) -> Result<Response<hyper::body::Incoming>, HttpErrorResponseBody> {
         let body: Body = match request_body {
-            None => Body::empty(),
-            Some(input) => serde_urlencoded::to_string(&input).unwrap().into(),
+            None => todo!(),
+            Some(input) => todo!(),//serde_urlencoded::to_string(&input).unwrap().into(),
         };
 
         self.make_request_with_body_url_encoded(
@@ -161,11 +163,11 @@ impl ClientTestContext {
         method: Method,
         path: &str,
         expected_status: StatusCode,
-    ) -> Result<Response<Body>, HttpErrorResponseBody> {
+    ) -> Result<Response<hyper::body::Incoming>, HttpErrorResponseBody> {
         self.make_request_with_body(
             method,
             path,
-            Body::empty(),
+            todo!(),
             expected_status,
         )
         .await
@@ -178,7 +180,7 @@ impl ClientTestContext {
         path: &str,
         expected_status: StatusCode,
     ) -> HttpErrorResponseBody {
-        self.make_request_with_body(method, path, "".into(), expected_status)
+        self.make_request_with_body(method, path, todo!(), expected_status)
             .await
             .unwrap_err()
     }
@@ -204,7 +206,7 @@ impl ClientTestContext {
         path: &str,
         body: Body,
         expected_status: StatusCode,
-    ) -> Result<Response<Body>, HttpErrorResponseBody> {
+    ) -> Result<Response<hyper::body::Incoming>, HttpErrorResponseBody> {
         let uri = self.url(path);
         let request = Request::builder()
             .method(method)
@@ -220,7 +222,7 @@ impl ClientTestContext {
         path: &str,
         body: Body,
         expected_status: StatusCode,
-    ) -> Result<Response<Body>, HttpErrorResponseBody> {
+    ) -> Result<Response<hyper::body::Incoming>, HttpErrorResponseBody> {
         let uri = self.url(path);
         let request = Request::builder()
             .method(method)
@@ -235,7 +237,7 @@ impl ClientTestContext {
         &self,
         request: Request<Body>,
         expected_status: StatusCode,
-    ) -> Result<Response<Body>, HttpErrorResponseBody> {
+    ) -> Result<Response<hyper::body::Incoming>, HttpErrorResponseBody> {
         let time_before = chrono::offset::Utc::now().timestamp();
         info!(self.client_log, "client request";
             "method" => %request.method(),
@@ -320,9 +322,11 @@ impl ClientTestContext {
         // For "204 No Content" responses, validate that we got no content in
         // the body.
         if status == StatusCode::NO_CONTENT {
-            let body_bytes = to_bytes(response.body_mut())
+            let body_bytes = response.body_mut()
+                .collect()
                 .await
-                .expect("error reading body");
+                .expect("error reading body")
+                .to_bytes();
             assert_eq!(0, body_bytes.len());
         }
 
@@ -478,7 +482,7 @@ impl<Context: ServerContext> TestContext<Context> {
     /// `0` to allow the server to bind to any available port.  This is necessary
     /// in order for it to be used concurrently by many tests.
     pub fn new(
-        api: ApiDescription<Context>,
+        api: ApiDescription<Context, hyper::body::Incoming>,
         private: Context,
         config_dropshot: &ConfigDropshot,
         log_context: Option<LogContext>,
@@ -519,15 +523,18 @@ impl<Context: ServerContext> TestContext<Context> {
 /// asynchronously read the body of the response and parse it accordingly,
 /// returning a vector of T.
 pub async fn read_ndjson<T: DeserializeOwned>(
-    response: &mut Response<Body>,
+    response: &mut Response<hyper::body::Incoming>,
 ) -> Vec<T> {
     let headers = response.headers();
     assert_eq!(
         crate::CONTENT_TYPE_NDJSON,
         headers.get(http::header::CONTENT_TYPE).expect("missing content-type")
     );
-    let body_bytes =
-        to_bytes(response.body_mut()).await.expect("error reading body");
+    let body_bytes = response.body_mut()
+        .collect()
+        .await
+        .expect("error reading body")
+        .to_bytes();
     let body_string = String::from_utf8(body_bytes.as_ref().into())
         .expect("response contained non-UTF-8 bytes");
 
@@ -549,30 +556,36 @@ pub async fn read_ndjson<T: DeserializeOwned>(
 /// be parseable via Serde as type T, asynchronously read the body of the
 /// response and parse it, returning an instance of T.
 pub async fn read_json<T: DeserializeOwned>(
-    response: &mut Response<Body>,
+    response: &mut Response<hyper::body::Incoming>,
 ) -> T {
     let headers = response.headers();
     assert_eq!(
         crate::CONTENT_TYPE_JSON,
         headers.get(http::header::CONTENT_TYPE).expect("missing content-type")
     );
-    let body_bytes =
-        to_bytes(response.body_mut()).await.expect("error reading body");
+    let body_bytes = response.body_mut()
+        .collect()
+        .await
+        .expect("error reading body")
+        .to_bytes();
     serde_json::from_slice(body_bytes.as_ref())
         .expect("failed to parse server body as expected type")
 }
 
 /// Given a Hyper Response whose body is expected to be a UTF-8-encoded string,
 /// asynchronously read the body.
-pub async fn read_string(response: &mut Response<Body>) -> String {
-    let body_bytes =
-        to_bytes(response.body_mut()).await.expect("error reading body");
+pub async fn read_string(response: &mut Response<hyper::body::Incoming>) -> String {
+    let body_bytes = response.body_mut()
+        .collect()
+        .await
+        .expect("error reading body")
+        .to_bytes();
     String::from_utf8(body_bytes.as_ref().into())
         .expect("response contained non-UTF-8 bytes")
 }
 
 /// Given a Hyper Response, extract and parse the Content-Length header.
-pub fn read_content_length(response: &Response<Body>) -> usize {
+pub fn read_content_length(response: &Response<hyper::body::Incoming>) -> usize {
     response
         .headers()
         .get(http::header::CONTENT_LENGTH)
@@ -592,7 +605,8 @@ pub async fn object_get<T: DeserializeOwned>(
         .make_request_with_body(
             Method::GET,
             &object_url,
-            "".into(),
+            //"".into(),
+            todo!(),
             StatusCode::OK,
         )
         .await
@@ -609,7 +623,8 @@ pub async fn objects_list<T: DeserializeOwned>(
         .make_request_with_body(
             Method::GET,
             &list_url,
-            "".into(),
+            //"".into(),
+            todo!(),
             StatusCode::OK,
         )
         .await
@@ -629,7 +644,8 @@ where
         .make_request_with_body(
             Method::GET,
             &list_url,
-            "".into(),
+            //"".into(),
+            todo!(),
             StatusCode::OK,
         )
         .await

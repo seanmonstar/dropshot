@@ -17,7 +17,7 @@ use http::header;
 use http::Response;
 use http::StatusCode;
 use hyper::upgrade::OnUpgrade;
-use hyper::Body;
+use hyper::body::Body;
 use schemars::JsonSchema;
 use serde_json::json;
 use sha1::{Digest, Sha1};
@@ -42,7 +42,7 @@ pub type WebsocketChannelResult =
 /// [WebsocketUpgrade::handle]'s return type.
 /// The `#[endpoint]` handler must return the value returned by
 /// [WebsocketUpgrade::handle]. (This is done for you by `#[channel]`.)
-pub type WebsocketEndpointResult = Result<Response<Body>, HttpError>;
+pub type WebsocketEndpointResult = Result<Response<crate::handler::ResponseBody>, HttpError>;
 
 /// The upgraded connection passed as the last argument to the websocket
 /// handler function. [`WebsocketConnection::into_inner`] can be used to
@@ -85,9 +85,9 @@ fn derive_accept_key(request_key: &[u8]) -> String {
 /// request does not contain websocket upgrade headers.
 #[async_trait]
 impl ExclusiveExtractor for WebsocketUpgrade {
-    async fn from_request<Context: ServerContext>(
+    async fn from_request<Context: ServerContext, ReqBody: Body>(
         rqctx: &RequestContext<Context>,
-        request: hyper::Request<hyper::Body>,
+        request: hyper::Request<ReqBody>,
     ) -> Result<Self, HttpError> {
         if !request
             .headers()

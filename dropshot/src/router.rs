@@ -11,6 +11,7 @@ use crate::ApiEndpoint;
 use crate::ApiEndpointBodyContentType;
 use http::Method;
 use http::StatusCode;
+use hyper::body::Body;
 use percent_encoding::percent_decode_str;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -63,9 +64,9 @@ use std::sync::Arc;
 ///   handlers.  After that initialization period, the router will be
 ///   read-only.  This behavior isn't enforced by `HttpRouter`.
 #[derive(Debug)]
-pub struct HttpRouter<Context: ServerContext> {
+pub struct HttpRouter<Context: ServerContext, ReqBody: Body> {
     /// root of the trie
-    root: Box<HttpRouterNode<Context>>,
+    root: Box<HttpRouterNode<Context, ReqBody>>,
 }
 
 /// Each node in the tree represents a group of HTTP resources having the same
@@ -79,21 +80,21 @@ pub struct HttpRouter<Context: ServerContext> {
 /// variable edges, but not both.  However, we don't necessarily know what type
 /// of outgoing edges a node will have when we create it.
 #[derive(Debug)]
-struct HttpRouterNode<Context: ServerContext> {
+struct HttpRouterNode<Context: ServerContext, ReqBody: Body> {
     /// Handlers, etc. for each of the HTTP methods defined for this node.
-    methods: BTreeMap<String, ApiEndpoint<Context>>,
+    methods: BTreeMap<String, ApiEndpoint<Context, ReqBody>>,
     /// Edges linking to child nodes.
-    edges: Option<HttpRouterEdges<Context>>,
+    edges: Option<HttpRouterEdges<Context, ReqBody>>,
 }
 
 #[derive(Debug)]
-enum HttpRouterEdges<Context: ServerContext> {
+enum HttpRouterEdges<Context: ServerContext, ReqBody: Body> {
     /// Outgoing edges for literal paths.
-    Literals(BTreeMap<String, Box<HttpRouterNode<Context>>>),
+    Literals(BTreeMap<String, Box<HttpRouterNode<Context, ReqBody>>>),
     /// Outgoing edge for variable-named paths.
-    VariableSingle(String, Box<HttpRouterNode<Context>>),
+    VariableSingle(String, Box<HttpRouterNode<Context, ReqBody>>),
     /// Outgoing edge that consumes all remaining components.
-    VariableRest(String, Box<HttpRouterNode<Context>>),
+    VariableRest(String, Box<HttpRouterNode<Context, ReqBody>>),
 }
 
 /// `PathSegment` represents a segment in a URI path when the router is being
@@ -208,19 +209,19 @@ impl MapValue for VariableValue {
 /// corresponding values in the actual path, and the expected body
 /// content type.
 #[derive(Debug)]
-pub struct RouterLookupResult<Context: ServerContext> {
-    pub handler: Arc<dyn RouteHandler<Context>>,
+pub struct RouterLookupResult<Context: ServerContext, ReqBody: Body> {
+    pub handler: Arc<dyn RouteHandler<Context, ReqBody>>,
     pub variables: VariableSet,
     pub body_content_type: ApiEndpointBodyContentType,
 }
 
-impl<Context: ServerContext> HttpRouterNode<Context> {
+impl<Context: ServerContext, ReqBody: Body> HttpRouterNode<Context, ReqBody> {
     pub fn new() -> Self {
         HttpRouterNode { methods: BTreeMap::new(), edges: None }
     }
 }
 
-impl<Context: ServerContext> HttpRouter<Context> {
+impl<Context: ServerContext, ReqBody: Body> HttpRouter<Context, ReqBody> {
     /// Returns a new `HttpRouter` with no routes configured.
     pub fn new() -> Self {
         HttpRouter { root: Box::new(HttpRouterNode::new()) }
@@ -229,7 +230,7 @@ impl<Context: ServerContext> HttpRouter<Context> {
     /// Configure a route for HTTP requests based on the HTTP `method` and
     /// URI `path`.  See the `HttpRouter` docs for information about how `path`
     /// is processed.  Requests matching `path` will be resolved to `handler`.
-    pub fn insert(&mut self, endpoint: ApiEndpoint<Context>) {
+    pub fn insert(&mut self, endpoint: ApiEndpoint<Context, ReqBody>) {
         let method = endpoint.method.clone();
         let path = endpoint.path.clone();
 
@@ -406,7 +407,7 @@ impl<Context: ServerContext> HttpRouter<Context> {
         &self,
         method: &Method,
         path: InputPath<'_>,
-    ) -> Result<RouterLookupResult<Context>, HttpError> {
+    ) -> Result<RouterLookupResult<Context, ReqBody>, HttpError> {
         let all_segments = input_path_to_segments(&path).map_err(|_| {
             HttpError::for_bad_request(
                 None,
@@ -509,9 +510,9 @@ fn insert_var(
     varnames.insert(new_varname.clone());
 }
 
-impl<'a, Context: ServerContext> IntoIterator for &'a HttpRouter<Context> {
-    type Item = (String, String, &'a ApiEndpoint<Context>);
-    type IntoIter = HttpRouterIter<'a, Context>;
+impl<'a, Context: ServerContext, ReqBody: Body> IntoIterator for &'a HttpRouter<Context, ReqBody> {
+    type Item = (String, String, &'a ApiEndpoint<Context, ReqBody>);
+    type IntoIter = HttpRouterIter<'a, Context, ReqBody>;
     fn into_iter(self) -> Self::IntoIter {
         HttpRouterIter::new(self)
     }
@@ -525,16 +526,16 @@ impl<'a, Context: ServerContext> IntoIterator for &'a HttpRouter<Context> {
 /// of path segments and the iterators at each corresponding node. We start with
 /// the root node's `methods` iterator and a stack consisting of a
 /// blank string and an iterator over the root node's children.
-pub struct HttpRouterIter<'a, Context: ServerContext> {
+pub struct HttpRouterIter<'a, Context: ServerContext, ReqBody: Body> {
     method:
-        Box<dyn Iterator<Item = (&'a String, &'a ApiEndpoint<Context>)> + 'a>,
-    path: Vec<(PathSegment, Box<PathIter<'a, Context>>)>,
+        Box<dyn Iterator<Item = (&'a String, &'a ApiEndpoint<Context, ReqBody>)> + 'a>,
+    path: Vec<(PathSegment, Box<PathIter<'a, Context, ReqBody>>)>,
 }
-type PathIter<'a, Context> =
-    dyn Iterator<Item = (PathSegment, &'a Box<HttpRouterNode<Context>>)> + 'a;
+type PathIter<'a, Context, ReqBody> =
+    dyn Iterator<Item = (PathSegment, &'a Box<HttpRouterNode<Context, ReqBody>>)> + 'a;
 
-impl<'a, Context: ServerContext> HttpRouterIter<'a, Context> {
-    fn new(router: &'a HttpRouter<Context>) -> Self {
+impl<'a, Context: ServerContext, ReqBody: Body> HttpRouterIter<'a, Context, ReqBody> {
+    fn new(router: &'a HttpRouter<Context, ReqBody>) -> Self {
         HttpRouterIter {
             method: Box::new(router.root.methods.iter()),
             path: vec![(
@@ -549,8 +550,8 @@ impl<'a, Context: ServerContext> HttpRouterIter<'a, Context> {
     /// path parameter variable, and a modified iterator in the case of
     /// literal, explicit path segments.
     fn iter_node(
-        node: &'a HttpRouterNode<Context>,
-    ) -> Box<PathIter<'a, Context>> {
+        node: &'a HttpRouterNode<Context, ReqBody>,
+    ) -> Box<PathIter<'a, Context, ReqBody>> {
         match &node.edges {
             Some(HttpRouterEdges::Literals(map)) => Box::new(
                 map.iter()
@@ -589,8 +590,8 @@ impl<'a, Context: ServerContext> HttpRouterIter<'a, Context> {
     }
 }
 
-impl<'a, Context: ServerContext> Iterator for HttpRouterIter<'a, Context> {
-    type Item = (String, String, &'a ApiEndpoint<Context>);
+impl<'a, Context: ServerContext, ReqBody: Body> Iterator for HttpRouterIter<'a, Context, ReqBody> {
+    type Item = (String, String, &'a ApiEndpoint<Context, ReqBody>);
 
     fn next(&mut self) -> Option<Self::Item> {
         // If there are no path components left then we've reached the end of

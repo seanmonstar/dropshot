@@ -19,12 +19,12 @@ use bytes::Bytes;
 use bytes::BytesMut;
 use futures::Stream;
 use futures::TryStreamExt;
-use hyper::body::HttpBody;
+use http_body_util::BodyExt;
+use hyper::body::Body;
 use schemars::schema::InstanceType;
 use schemars::schema::SchemaObject;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
-use std::convert::Infallible;
 use std::fmt::Debug;
 
 // TypedBody: body extractor for formats that can be deserialized to a specific
@@ -55,9 +55,9 @@ pub struct MultipartBody {
 
 #[async_trait]
 impl ExclusiveExtractor for MultipartBody {
-    async fn from_request<Context: ServerContext>(
+    async fn from_request<Context: ServerContext, ReqBody: Body>(
         _rqctx: &RequestContext<Context>,
-        request: hyper::Request<hyper::Body>,
+        request: hyper::Request<ReqBody>,
     ) -> Result<Self, HttpError> {
         let (parts, body) = request.into_parts();
         // Get the content-type header.
@@ -119,9 +119,9 @@ impl ExclusiveExtractor for MultipartBody {
 
 /// Given an HTTP request, attempt to read the body, parse it according
 /// to the content type, and deserialize it to an instance of `BodyType`.
-async fn http_request_load_body<Context: ServerContext, BodyType>(
+async fn http_request_load_body<Context: ServerContext, ReqBody: Body, BodyType>(
     rqctx: &RequestContext<Context>,
-    request: hyper::Request<hyper::Body>,
+    request: hyper::Request<ReqBody>,
 ) -> Result<TypedBody<BodyType>, HttpError>
 where
     BodyType: JsonSchema + DeserializeOwned + Send + Sync,
@@ -202,9 +202,9 @@ impl<BodyType> ExclusiveExtractor for TypedBody<BodyType>
 where
     BodyType: JsonSchema + DeserializeOwned + Send + Sync + 'static,
 {
-    async fn from_request<Context: ServerContext>(
+    async fn from_request<Context: ServerContext, ReqBody>(
         rqctx: &RequestContext<Context>,
-        request: hyper::Request<hyper::Body>,
+        request: hyper::Request<ReqBody>,
     ) -> Result<TypedBody<BodyType>, HttpError> {
         http_request_load_body(rqctx, request).await
     }
@@ -256,9 +256,9 @@ impl UntypedBody {
 
 #[async_trait]
 impl ExclusiveExtractor for UntypedBody {
-    async fn from_request<Context: ServerContext>(
+    async fn from_request<Context: ServerContext, ReqBody>(
         rqctx: &RequestContext<Context>,
-        request: hyper::Request<hyper::Body>,
+        request: hyper::Request<ReqBody>,
     ) -> Result<UntypedBody, HttpError> {
         let server = &rqctx.server;
         let body = request.into_body();
@@ -282,22 +282,25 @@ impl ExclusiveExtractor for UntypedBody {
 /// raw bytes available to the consumer.
 #[derive(Debug)]
 pub struct StreamingBody {
-    body: hyper::Body,
+    body: (),
     cap: usize,
 }
 
 impl StreamingBody {
-    fn new(body: hyper::Body, cap: usize) -> Self {
-        Self { body, cap }
+    fn new<T>(_yolo: T, cap: usize) -> Self {
+        Self { body: (), cap }
     }
 
     /// Not part of the public API. Used only for doctests.
     #[doc(hidden)]
     pub fn __from_bytes(data: Bytes) -> Self {
+        /*
         let cap = data.len();
         let stream = futures::stream::iter([Ok::<_, Infallible>(data)]);
         let body = hyper::Body::wrap_stream(stream);
         Self { body, cap }
+        */
+        todo!()
     }
 
     /// Converts `self` into a stream.
@@ -375,10 +378,12 @@ impl StreamingBody {
     pub fn into_stream(
         mut self,
     ) -> impl Stream<Item = Result<Bytes, HttpError>> + Send {
+        /*
         async_stream::try_stream! {
             let mut bytes_read: usize = 0;
-            while let Some(buf_res) = self.body.data().await {
+            while let Some(buf_res) = self.body.frame().await {
                 let buf = buf_res?;
+                let Ok(buf) = buf.into_data() else { continue };
                 let len = buf.len();
 
                 if bytes_read + len > self.cap {
@@ -393,11 +398,9 @@ impl StreamingBody {
                 bytes_read += len;
                 yield buf;
             }
-
-            // Read the trailers as well, even though we're not going to do anything
-            // with them.
-            self.body.trailers().await?;
         }
+        */
+        futures::stream::once(async { Ok("".into()) })
     }
 
     /// Converts `self` into a [`BytesMut`], buffering the entire response in
@@ -415,9 +418,9 @@ impl StreamingBody {
 
 #[async_trait]
 impl ExclusiveExtractor for StreamingBody {
-    async fn from_request<Context: ServerContext>(
+    async fn from_request<Context: ServerContext, ReqBody: Body>(
         rqctx: &RequestContext<Context>,
-        request: hyper::Request<hyper::Body>,
+        request: hyper::Request<ReqBody>,
     ) -> Result<Self, HttpError> {
         let server = &rqctx.server;
 

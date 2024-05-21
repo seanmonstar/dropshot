@@ -6,7 +6,7 @@ use super::config::{ConfigDropshot, ConfigTls};
 #[cfg(feature = "usdt-probes")]
 use super::dtrace::probes;
 use super::error::HttpError;
-use super::handler::RequestContext;
+use super::handler::{RequestContext, ResponseBody};
 use super::http_util::HEADER_REQUEST_ID;
 use super::router::HttpRouter;
 use super::ProbeRegistration;
@@ -18,12 +18,7 @@ use futures::future::{
 };
 use futures::lock::Mutex;
 use futures::stream::{Stream, StreamExt};
-use hyper::server::{
-    conn::{AddrIncoming, AddrStream},
-    Server,
-};
 use hyper::service::Service;
-use hyper::Body;
 use hyper::Request;
 use hyper::Response;
 use rustls;
@@ -66,7 +61,7 @@ pub struct DropshotState<C: ServerContext> {
     /// static server configuration parameters
     pub config: ServerConfig,
     /// request router
-    pub router: HttpRouter<C>,
+    pub router: HttpRouter<C, hyper::body::Incoming>,
     /// server-wide log handle
     pub log: Logger,
     /// bound local address for the server.
@@ -109,7 +104,7 @@ pub struct HttpServerStarter<C: ServerContext> {
 impl<C: ServerContext> HttpServerStarter<C> {
     pub fn new(
         config: &ConfigDropshot,
-        api: ApiDescription<C>,
+        api: ApiDescription<C, hyper::body::Incoming>,
         private: C,
         log: &Logger,
     ) -> Result<HttpServerStarter<C>, GenericError> {
@@ -118,7 +113,7 @@ impl<C: ServerContext> HttpServerStarter<C> {
 
     pub fn new_with_tls(
         config: &ConfigDropshot,
-        api: ApiDescription<C>,
+        api: ApiDescription<C, hyper::body::Incoming>,
         private: C,
         log: &Logger,
         tls: Option<ConfigTls>,
@@ -247,7 +242,8 @@ enum WrappedHttpServerStarter<C: ServerContext> {
 }
 
 struct InnerHttpServerStarter<C: ServerContext>(
-    Server<AddrIncoming, ServerConnectionHandler<C>>,
+    TcpListener,
+    ServerConnectionHandler<C>,
 );
 
 type InnerHttpServerStarterNewReturn<C> =
@@ -277,12 +273,12 @@ impl<C: ServerContext> InnerHttpServerStarter<C> {
     fn new(
         config: &ConfigDropshot,
         server_config: ServerConfig,
-        api: ApiDescription<C>,
+        api: ApiDescription<C, hyper::body::Incoming>,
         private: C,
         log: &Logger,
         handler_waitgroup_worker: waitgroup::Worker,
     ) -> Result<InnerHttpServerStarterNewReturn<C>, hyper::Error> {
-        let incoming = AddrIncoming::bind(&config.bind_address)?;
+        let incoming = TcpListener::bind(&config.bind_address)?;
         let local_addr = incoming.local_addr();
 
         let app_state = Arc::new(DropshotState {
@@ -296,9 +292,9 @@ impl<C: ServerContext> InnerHttpServerStarter<C> {
         });
 
         let make_service = ServerConnectionHandler::new(app_state.clone());
-        let builder = hyper::Server::builder(incoming);
-        let server = builder.serve(make_service);
-        Ok((InnerHttpServerStarter(server), app_state, local_addr))
+        //let builder = hyper::Server::builder(incoming);
+        //let server = builder.serve(make_service);
+        Ok((InnerHttpServerStarter(incoming, make_service), app_state, local_addr))
     }
 }
 
@@ -452,21 +448,9 @@ impl HttpsAcceptor {
     }
 }
 
-impl hyper::server::accept::Accept for HttpsAcceptor {
-    type Conn = TlsConn;
-    type Error = std::io::Error;
-
-    fn poll_accept(
-        mut self: Pin<&mut Self>,
-        ctx: &mut core::task::Context,
-    ) -> core::task::Poll<Option<Result<Self::Conn, Self::Error>>> {
-        let pinned = Pin::new(&mut self.stream);
-        pinned.poll_next(ctx)
-    }
-}
-
 struct InnerHttpsServerStarter<C: ServerContext>(
-    Server<HttpsAcceptor, ServerConnectionHandler<C>>,
+    HttpsAcceptor,
+    ServerConnectionHandler<C>,
 );
 
 /// Create a TLS configuration from the Dropshot config structure.
@@ -562,7 +546,7 @@ impl<C: ServerContext> InnerHttpsServerStarter<C> {
     fn new(
         config: &ConfigDropshot,
         server_config: ServerConfig,
-        api: ApiDescription<C>,
+        api: ApiDescription<C, hyper::body::Incoming>,
         private: C,
         log: &Logger,
         tls: &ConfigTls,
@@ -597,9 +581,9 @@ impl<C: ServerContext> InnerHttpsServerStarter<C> {
         });
 
         let make_service = ServerConnectionHandler::new(Arc::clone(&app_state));
-        let server = Server::builder(https_acceptor).serve(make_service);
+        //let server = Server::builder(https_acceptor).serve(make_service);
 
-        Ok((InnerHttpsServerStarter(server), app_state, local_addr))
+        Ok((InnerHttpsServerStarter(https_acceptor, make_service), app_state, local_addr))
     }
 }
 
@@ -608,14 +592,7 @@ impl<C: ServerContext> Service<&TlsConn> for ServerConnectionHandler<C> {
     type Error = GenericError;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
-    fn poll_ready(
-        &mut self,
-        _ctx: &mut Context<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, conn: &TlsConn) -> Self::Future {
+    fn call(&self, conn: &TlsConn) -> Self::Future {
         let server = Arc::clone(&self.server);
         let remote_addr = conn.remote_addr();
         Box::pin(http_connection_handle(server, remote_addr))
@@ -774,8 +751,8 @@ async fn http_connection_handle<C: ServerContext>(
 async fn http_request_handle_wrap<C: ServerContext>(
     server: Arc<DropshotState<C>>,
     remote_addr: SocketAddr,
-    request: Request<Body>,
-) -> Result<Response<Body>, GenericError> {
+    request: Request<hyper::body::Incoming>,
+) -> Result<Response<ResponseBody>, GenericError> {
     // This extra level of indirection makes error handling much more
     // straightforward, since the request handling code can simply return early
     // with an error and we'll treat it like an error from any of the endpoints
@@ -900,11 +877,11 @@ async fn http_request_handle_wrap<C: ServerContext>(
 
 async fn http_request_handle<C: ServerContext>(
     server: Arc<DropshotState<C>>,
-    request: Request<Body>,
+    request: Request<hyper::body::Incoming>,
     request_id: &str,
     request_log: Logger,
     remote_addr: std::net::SocketAddr,
-) -> Result<Response<Body>, HttpError> {
+) -> Result<Response<ResponseBody>, HttpError> {
     // TODO-hardening: is it correct to (and do we correctly) read the entire
     // request body even if we decide it's too large and are going to send a 400
     // response?
@@ -1021,6 +998,7 @@ impl<C: ServerContext> ServerConnectionHandler<C> {
     }
 }
 
+/* TODO(SEAN)
 impl<T: ServerContext> Service<&AddrStream> for ServerConnectionHandler<T> {
     // Recall that a Service in this context is just something that takes a
     // request (which could be anything) and produces a response (which could be
@@ -1031,14 +1009,6 @@ impl<T: ServerContext> Service<&AddrStream> for ServerConnectionHandler<T> {
     type Response = ServerRequestHandler<T>;
     type Error = GenericError;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(
-        &mut self,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
-        // TODO is this right?
-        Poll::Ready(Ok(()))
-    }
 
     fn call(&mut self, conn: &AddrStream) -> Self::Future {
         // We're given a borrowed reference to the AddrStream, but our interface
@@ -1053,6 +1023,7 @@ impl<T: ServerContext> Service<&AddrStream> for ServerConnectionHandler<T> {
         Box::pin(http_connection_handle(server, remote_addr))
     }
 }
+*/
 
 /// ServerRequestHandler is a Hyper Service implementation that forwards
 /// incoming requests to `http_request_handle_wrap()`, including as an argument
@@ -1073,20 +1044,12 @@ impl<C: ServerContext> ServerRequestHandler<C> {
     }
 }
 
-impl<C: ServerContext> Service<Request<Body>> for ServerRequestHandler<C> {
-    type Response = Response<Body>;
+impl<C: ServerContext> Service<Request<hyper::body::Incoming>> for ServerRequestHandler<C> {
+    type Response = Response<ResponseBody>;
     type Error = GenericError;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
-    fn poll_ready(
-        &mut self,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
-        // TODO is this right?
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: Request<Body>) -> Self::Future {
+    fn call(&self, req: Request<hyper::body::Incoming>) -> Self::Future {
         Box::pin(http_request_handle_wrap(
             Arc::clone(&self.server),
             self.remote_addr,
